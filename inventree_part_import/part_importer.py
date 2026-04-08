@@ -12,6 +12,7 @@ from inventree.api import InvenTreeAPI
 from inventree.base import Parameter, ParameterTemplate
 from inventree.company import Company, ManufacturerPart, SupplierPart, SupplierPriceBreak
 from inventree.part import Part
+from inventree.stock import StockItem, StockLocation
 from requests.compat import quote
 from requests.exceptions import HTTPError
 from thefuzz import fuzz
@@ -51,6 +52,9 @@ class PartImporter:
         self.interactive = interactive
         self.verbose = verbose
 
+        self.imported_part = None
+        self.imported_api_part = None
+
         # preload pre_creation_hooks
         get_pre_creation_hooks()
 
@@ -69,6 +73,7 @@ class PartImporter:
         existing_part: Part | None = None,
         supplier_id: str | None = None,
         only_supplier: bool = False,
+        stock: int = None
     ):
         info(f"searching for {search_term} ...", end="\n")
         import_result = ImportResult.SUCCESS
@@ -101,7 +106,8 @@ class PartImporter:
                 continue
 
             try:
-                import_result |= self.import_supplier_part(supplier, api_part, existing_part)
+                result = self.import_supplier_part(supplier, api_part, existing_part)
+                import_result |= result
             except HTTPError as e:
                 import_result = ImportResult.ERROR
 
@@ -121,7 +127,6 @@ class PartImporter:
 
                 if self.verbose:
                     error(traceback.format_exc(), prefix="FULL TRACEBACK:\n")
-
             if import_result == ImportResult.ERROR:
                 # let the other api calls finish
                 for _, other_results in search_results:
@@ -130,8 +135,31 @@ class PartImporter:
 
         if not self.existing_manufacturer_part:
             import_result |= ImportResult.FAILURE
+        else:
+            if stock is not None and self.imported_part is not None:
+                if isinstance(stock, bool):
+                    stock_quantity = self._prompt_stock_quantity(
+                        self.imported_api_part or api_part
+                    )
+                elif isinstance(stock, (int, float)):
+                    stock_quantity = float(stock)
+                else:
+                    stock_quantity = None
+                if stock_quantity is not None:
+                    self.setup_stock(self.imported_part, stock_quantity)
 
         return import_result
+
+    def _prompt_stock_quantity(self, api_part: ApiPart):
+        prompt(f"enter stock quantity for {api_part.MPN} ({api_part.SKU})")
+        while True:
+            quantity = prompt_input("stock quantity")
+            if quantity == "":
+                return None
+            try:
+                return float(quantity)
+            except ValueError:
+                warning("invalid stock quantity, enter a number")
 
     @staticmethod
     def select_api_part(api_parts: list[ApiPart]):
@@ -224,6 +252,8 @@ class PartImporter:
             import_result |= result
 
         self.existing_manufacturer_part = manufacturer_part
+        self.imported_part = part
+        self.imported_api_part = api_part
 
         supplier_part_data = {
             "part": part.pk,
@@ -436,6 +466,36 @@ class PartImporter:
             import_result |= ImportResult.INCOMPLETE
 
         return import_result
+    
+    def setup_stock(self, part, quantity):
+        if self.dry_run:
+            return
+
+        # Get or create default stock location
+        stock_locations = StockLocation.list(self.api)
+        if not stock_locations:
+            warning("no stock locations available, skipping stock creation")
+            return
+
+        default_location = stock_locations[0]
+
+        # Check if stock already exists for this part
+        existing_stock = StockItem.list(self.api, part=part.pk, location=default_location.pk)
+        if existing_stock:
+            # Update existing stock
+            stock_item = existing_stock[0]
+            old_quantity = stock_item.quantity
+            if old_quantity != quantity:
+                stock_item.save({"quantity": quantity})
+                info(f"updated stock for {part.name} from {old_quantity} to {quantity}")
+        else:
+            # Create new stock
+            StockItem.create(self.api, {
+                "part": part.pk,
+                "location": default_location.pk,
+                "quantity": quantity,
+            })
+            info(f"created stock for {part.name} with quantity {quantity}")
 
     @staticmethod
     def select_parameter(parameter_name: str, parameters: dict[str, Any]) -> tuple[str | None, Any]:

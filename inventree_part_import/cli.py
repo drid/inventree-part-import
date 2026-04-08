@@ -31,6 +31,63 @@ from .suppliers import get_suppliers, setup_supplier_companies
 
 P = ParamSpec("P")
 
+def _normalize_stock_value(value):
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_mouser_ibn_result(result):
+    manufacturer_part = result.get("ManufacturerPartnumber")
+    if not manufacturer_part:
+        return None, None
+
+    stock = _normalize_stock_value(
+        result.get("Quantity")
+    )
+    return manufacturer_part, stock
+
+
+def _resolve_mouser_ibn(ibn_code):
+    suppliers, _ = get_suppliers(reload=True, setup=False)
+    if (mouser := suppliers.get("mouser")) is None:
+        error("Mouser supplier is not configured, cannot use --ibn")
+        return None, None
+
+    results = mouser.search_by_ibn(ibn_code)
+    if not results:
+        error(f"no results for IBN '{ibn_code}'")
+        return None, None
+
+    if len(results) == 1:
+        manufacturer_part, stock = _extract_mouser_ibn_result(results[0])
+        if not manufacturer_part:
+            error("invalid IBN result: missing ManufacturerPartnumber")
+            return None, None
+        return manufacturer_part, stock
+
+    prompt(f"found {len(results)} IBN matches at Mouser, select which one to use")
+    choices = [
+        f"{item.get('MouserPartNumber', 'N/A')} | {item.get('MouserDescription', 'N/A')}"
+        for item in results
+    ]
+    choices.append("Cancel")
+    choice_index = select(choices, deselected_prefix="  ", selected_prefix="> ")
+    if choice_index == len(choices) - 1:
+        warning("IBN selection cancelled")
+        return None, None
+
+    selected = results[choice_index]
+    manufacturer_part, stock = _extract_mouser_ibn_result(selected)
+    if not manufacturer_part:
+        error("invalid IBN result: missing ManufacturerPartnumber")
+        return None, None
+
+    return manufacturer_part, stock
+
 
 def handle_errors(func: Callable[P, None]) -> Callable[P, None]:
     def wrapper(*args: Any, **kwargs: Any):
@@ -122,6 +179,7 @@ InteractiveChoices = click.Choice(("default", "false", "true", "twice"), case_se
 )
 @click.option("-v", "--verbose", is_flag=True, help="Enable verbose output for debugging.")
 @click.option("--ibn", help="Search by Mouser IBN.")
+@click.option("--stock", is_flag=True, help="Ask for stock quantity after creating the part. Implied for --ibn.")
 @click.option("--show-config-dir", is_flag=True, help="Show path to config directory and exit.")
 @click.option("--configure", type=AvailableSuppliersChoices, help="Configure supplier.")
 @click.option("--update", metavar="CATEGORY", help="Update all parts from InvenTree CATEGORY.")
@@ -133,20 +191,21 @@ InteractiveChoices = click.Choice(("default", "false", "true", "twice"), case_se
 @click.option("--version", is_flag=True, help="Show version and exit.")
 @handle_errors
 def inventree_part_import(
-    context: click.Context,
-    inputs: list[str],
-    supplier: str | None = None,
-    only: str | None = None,
-    interactive: Literal["default", "false", "true", "twice"] = "false",
-    dry: bool = False,
-    config_dir: Path | None = None,
-    verbose: bool = False,
-    ibn: str | None = None,
-    show_config_dir: bool = False,
-    configure: str | None = None,
-    update: str | None = None,
-    update_recursive: str | None = None,
-    version: bool = False,
+    context,
+    inputs,
+    supplier=None,
+    only=None,
+    interactive="false",
+    dry=False,
+    config_dir=False,
+    verbose=False,
+    ibn=None,
+    stock=False,
+    show_config_dir=False,
+    configure=None,
+    update=None,
+    update_recursive=None,
+    version=False,
 ):
     """Import supplier parts into InvenTree.
 
@@ -233,11 +292,14 @@ def inventree_part_import(
         return
 
     parts: list[str | Part]
+    stock_value = None
     if ibn:
-        if not (manufacturer_part := _resolve_mouser_ibn(ibn)):
+        manufacturer_part, ibn_stock = _resolve_mouser_ibn(ibn)
+        if not manufacturer_part:
             return
         parts = [manufacturer_part]
-    elif category_path := update_recursive or update:
+        stock_value = ibn_stock if ibn_stock is not None else True
+    elif (category_path := update_recursive or update):
         if update_recursive and update:
             hint("--update is being overridden by --update-recursive")
 
@@ -273,6 +335,9 @@ def inventree_part_import(
         info("nothing to import.")
         return
 
+    if stock and stock_value is None:
+        stock_value = True
+
     # make sure suppliers.yaml exists
     get_suppliers(reload=True)
     setup_supplier_companies(inventree_api)
@@ -289,9 +354,9 @@ def inventree_part_import(
         last_import_result = None
         for index, part in enumerate(parts):
             last_import_result = (
-                importer.import_part(part.name, part, supplier, only_supplier)
-                if isinstance(part, Part)
-                else importer.import_part(part, None, supplier, only_supplier)
+                importer.import_part(part.name, part, supplier, only_supplier, stock=stock_value)
+                if isinstance(part, Part) else
+                importer.import_part(part, None, supplier, only_supplier, stock=stock_value)
             )
             print()
             match last_import_result:
@@ -313,11 +378,13 @@ def inventree_part_import(
             incomplete_parts = []
 
             importer.interactive = True
+            # For reimport, only use numeric stock values, not the "ask" flag
+            rerun_stock = stock_value if isinstance(stock_value, (int, float)) else None
             for part in parts2:
                 import_result = (
-                    importer.import_part(part.name, part, supplier, only_supplier)
-                    if isinstance(part, Part)
-                    else importer.import_part(part, None, supplier, only_supplier)
+                    importer.import_part(part.name, part, supplier, only_supplier, stock=rerun_stock)
+                    if isinstance(part, Part) else
+                    importer.import_part(part, None, supplier, only_supplier, stock=rerun_stock)
                 )
                 match import_result:
                     case ImportResult.SUCCESS:
