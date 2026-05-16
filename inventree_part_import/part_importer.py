@@ -469,8 +469,6 @@ class PartImporter:
         return import_result
     
     def setup_stock(self, part, quantity):
-        if self.dry_run:
-            return
 
         # Get or create default stock location
         stock_locations = StockLocation.list(self.api)

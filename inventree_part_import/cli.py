@@ -119,19 +119,19 @@ def _resolve_mouser_ibn(ibn_code):
     suppliers, _ = get_suppliers(reload=True, setup=False)
     if (mouser := suppliers.get("mouser")) is None:
         error("Mouser supplier is not configured, cannot use --ibn")
-        return None
+        return None, None
 
     results = mouser.search_by_ibn(ibn_code)
     if not results:
         error(f"no results for IBN '{ibn_code}'")
-        return None
+        return None, None
 
     if len(results) == 1:
-        manufacturer_part = results[0].get("ManufacturerPartNumber")
+        manufacturer_part, stock = _extract_mouser_ibn_result(results[0])
         if not manufacturer_part:
             error("invalid IBN result: missing ManufacturerPartnumber")
-            return None
-        return manufacturer_part
+            return None, None
+        return manufacturer_part, stock
 
     prompt(f"found {len(results)} IBN matches at Mouser, select which one to use")
     choices = [
@@ -142,14 +142,15 @@ def _resolve_mouser_ibn(ibn_code):
     choice_index = select(choices, deselected_prefix="  ", selected_prefix="> ")
     if choice_index == len(choices) - 1:
         warning("IBN selection cancelled")
-        return None
+        return None, None
 
     selected = results[choice_index]
-    manufacturer_part = selected.get("ManufacturerPartnumber")
+    manufacturer_part, stock = _extract_mouser_ibn_result(selected)
     if not manufacturer_part:
         error("invalid IBN result: missing ManufacturerPartnumber")
-        return None
-    return manufacturer_part
+        return None, None
+
+    return manufacturer_part, stock
 
 _suppliers, _available_suppliers = get_suppliers(setup=False)
 SuppliersChoices = click.Choice(_suppliers.keys(), case_sensitive=False)
