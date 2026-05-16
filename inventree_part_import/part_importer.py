@@ -54,6 +54,7 @@ class PartImporter:
 
         self.imported_part = None
         self.imported_api_part = None
+        self.stock_location = None
 
         # preload pre_creation_hooks
         get_pre_creation_hooks()
@@ -477,10 +478,18 @@ class PartImporter:
             warning("no stock locations available, skipping stock creation")
             return
 
-        default_location = stock_locations[0]
+        # Select location if not yet selected or if multiple locations exist
+        if self.stock_location is None:
+            if len(stock_locations) == 1:
+                self.stock_location = stock_locations[0]
+            else:
+                prompt(f"select stock location for {part.name}")
+                location_names = [loc.name for loc in stock_locations]
+                index = select(location_names, deselected_prefix="  ", selected_prefix="> ")
+                self.stock_location = stock_locations[index]
 
         # Check if stock already exists for this part
-        existing_stock = StockItem.list(self.api, part=part.pk, location=default_location.pk)
+        existing_stock = StockItem.list(self.api, part=part.pk, location=self.stock_location.pk)
         if existing_stock:
             # Update existing stock
             stock_item = existing_stock[0]
@@ -492,7 +501,7 @@ class PartImporter:
             # Create new stock
             StockItem.create(self.api, {
                 "part": part.pk,
-                "location": default_location.pk,
+                "location": self.stock_location.pk,
                 "quantity": quantity,
             })
             info(f"created stock for {part.name} with quantity {quantity}")
